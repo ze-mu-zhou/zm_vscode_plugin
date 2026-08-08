@@ -64,15 +64,17 @@ async function detectTools(): Promise<ToolStatus> {
 	return { uncompyle6, pylingual, pycdc };
 }
 
-/** pyc 魔数识别结果。minor 为 0 表示无法识别。 */
+/** pyc 魔数识别结果。major 为 0 表示无法识别。 */
 interface PycVersionInfo {
+	major: number;
 	minor: number;
 	label: string;
 }
 
 /**
- * 读取 pyc 头部 4 字节魔数（小端），映射到 Python 版本。
+ * 读取 pyc 头部 2 字节魔数（小端），映射到 Python 版本。
  * 参考 CPython importlib/_bootstrap_external.py 的 magic 注释表：
+ * 2.6=62151-62161 2.7=62211；3.0=3131 3.1=3151 3.2=3180 3.3=3230 3.4=3310 3.5=3351；
  * 3.6=3379 3.7=3394 3.8=3413 3.9=3425 3.10=3439；3.11 起 magic=2900+50n 区间。
  */
 function readPycVersion(pycPath: string): PycVersionInfo {
@@ -84,24 +86,35 @@ function readPycVersion(pycPath: string): PycVersionInfo {
 		fs.closeSync(fd);
 		m = buf.readUInt16LE(0);
 	} catch {
-		return { minor: 0, label: 'unknown' };
+		return { major: 0, minor: 0, label: 'unknown' };
 	}
+	let major = 0;
 	let minor = 0;
-	if (m >= 3360 && m <= 3389) minor = 6;
-	else if (m >= 3390 && m <= 3412) minor = 7;
-	else if (m >= 3413 && m <= 3419) minor = 8;
-	else if (m >= 3420 && m <= 3429) minor = 9;
-	else if (m >= 3430 && m <= 3449) minor = 10;
-	else if (m >= 3450 && m <= 3499) minor = 11;
-	else if (m >= 3500 && m <= 3549) minor = 12;
-	else if (m >= 3550 && m <= 3599) minor = 13;
-	else if (m >= 3600 && m <= 3699) minor = 14;
-	return minor ? { minor, label: `3.${minor}` } : { minor: 0, label: `unknown (magic ${m})` };
+	if (m >= 3000 && m <= 3131) { major = 3; minor = 0; }
+	else if (m >= 3141 && m <= 3151) { major = 3; minor = 1; }
+	else if (m >= 3160 && m <= 3180) { major = 3; minor = 2; }
+	else if (m >= 3190 && m <= 3230) { major = 3; minor = 3; }
+	else if (m >= 3250 && m <= 3310) { major = 3; minor = 4; }
+	else if (m >= 3320 && m <= 3351) { major = 3; minor = 5; }
+	else if (m >= 3360 && m <= 3389) { major = 3; minor = 6; }
+	else if (m >= 3390 && m <= 3412) { major = 3; minor = 7; }
+	else if (m >= 3413 && m <= 3419) { major = 3; minor = 8; }
+	else if (m >= 3420 && m <= 3429) { major = 3; minor = 9; }
+	else if (m >= 3430 && m <= 3449) { major = 3; minor = 10; }
+	else if (m >= 3450 && m <= 3499) { major = 3; minor = 11; }
+	else if (m >= 3500 && m <= 3549) { major = 3; minor = 12; }
+	else if (m >= 3550 && m <= 3599) { major = 3; minor = 13; }
+	else if (m >= 3600 && m <= 3699) { major = 3; minor = 14; }
+	else if (m >= 62151 && m <= 62161) { major = 2; minor = 6; }
+	else if (m >= 62171 && m <= 62211) { major = 2; minor = 7; }
+	return major ? { major, minor, label: `${major}.${minor}` } : { major: 0, minor: 0, label: `unknown (magic ${m})` };
 }
 
 /**
  * 按 pyc 版本选择还原效果最好的工具链（已探测可用），返回依次尝试的工具名数组。
- * - ≤3.8: uncompyle6 规则引擎还原质量最好
+ * - 2.x / 3.4-3.5: uncompyle6 规则引擎还原质量最好
+ * - 3.0-3.3: 仅 pycdc 可用（uncompyle6 不支持，pylingual 也不支持）
+ * - 3.6-3.8: uncompyle6 最优
  * - 3.9-3.11: pycdc 支持良好且快
  * - 3.12-3.13: pycdc 支持有限，pylingual 优先
  * - 3.14: 仅 pylingual
@@ -110,7 +123,17 @@ function readPycVersion(pycPath: string): PycVersionInfo {
 function pickToolChain(version: PycVersionInfo, tools: ToolStatus): string[] {
 	const chain: string[] = [];
 	const add = (t: string | null) => { if (t && !chain.includes(t)) chain.push(t); };
+	if (version.major === 2) {
+		add(tools.uncompyle6); add(tools.pycdc);
+		return chain;
+	}
 	switch (version.minor) {
+		case 0: case 1: case 2: case 3:
+			add(tools.pycdc); add(tools.uncompyle6);
+			break;
+		case 4: case 5:
+			add(tools.uncompyle6); add(tools.pycdc);
+			break;
 		case 6: case 7: case 8:
 			add(tools.uncompyle6); add(tools.pylingual); add(tools.pycdc);
 			break;
@@ -132,7 +155,7 @@ function pickToolChain(version: PycVersionInfo, tools: ToolStatus): string[] {
 const INSTALL_HINTS =
 	'# 安装方法（未安装的工具）:\n' +
 	'#   pylingual（3.6-3.14，优先）  : git clone https://github.com/syssec-utd/pylingual && uv tool install ./pylingual\n' +
-	'#   uncompyle6（≤3.8）          : pip install uncompyle6\n' +
+	'#   uncompyle6（2.7 与 ≤3.8）      : pip install uncompyle6（需 Python ≤3.8 环境，如 uv tool install --python 3.8）\n' +
 	'#   pycdc（3.9-3.13）            : https://github.com/zrax/pycdc/releases\n' +
 	'# 提示: pylingual 首次反编译需从 HuggingFace 下载模型，国内网络自动走 hf-mirror 镜像，可能较慢（最长 10 分钟）；\n' +
 	'#       若长时间无结果，通常是网络无法访问模型仓库，可设置环境变量 HF_ENDPOINT 指定其他镜像后重启 VS Code。\n' +
