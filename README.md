@@ -1,71 +1,31 @@
-# zemu-python-check README
+# zemu-python-check
 
-This is the README for your extension "zemu-python-check". After writing up a brief description, we recommend including the following sections.
+Python 安全检查 + pyc 反编译查看器（VS Code 扩展）。
 
 ## Features
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
-
-For example if there is an image subfolder under your extension project workspace:
-
-\!\[feature X\]\(images/feature-x.png\)
-
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+- **基础 python 下限版本扫描**：对打开的 Python 文件运行 vermin，检测代码所需的最低 Python 版本并给出提示。
+- **pyc 反编译查看器**：双击 `.pyc` 文件（或在资源管理器右键 → "反编译为临时 py 并打开"）自动反编译为临时 `.py` 文件并打开，反编译结果可被其他 Python 插件正常分析。
+  - 反编译工具链：`pylingual`（Python 3.6-3.14，优先）→ `uncompyle6`（≤3.8）→ `pycdc`（3.9-3.13），逐级自动回退。
+  - 三个工具均失败时直接提示失败，不再生成 dis 反汇编。
+  - 命令 "清理临时反编译文件"（`zemu.cleanupTmpPython`）可清除生成的临时文件。
 
 ## Requirements
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+- 反编译功能需要至少一个可用的反编译工具（推荐全部安装以覆盖不同 Python 版本）：
+  - `pylingual`：`git clone https://github.com/syssec-utd/pylingual && uv tool install ./pylingual`
+  - `uncompyle6`：`pip install uncompyle6`（Python ≤3.8）
+  - `pycdc`：从 https://github.com/zrax/pycdc/releases 下载
+  - 工具可执行文件需在 `PATH` 中，或位于 `~/.local/bin`（uv 默认安装目录）。
+- 版本扫描功能依赖本机 Python 环境中的 `vermin`。
 
-## Extension Settings
+## Usage
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
-
-For example:
-
-This extension contributes the following settings:
-
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
-
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
+1. 打开任意 Python 文件，扩展自动进行安全检查。
+2. 双击 `.pyc` 文件即可在自定义编辑器中查看反编译结果。
 
 ## Release Notes
 
-Users appreciate release notes as you update your extension.
+### 0.0.1
 
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
-
----
-
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+Initial release：Python 基础扫描 + pyc 反编译查看器。

@@ -6,6 +6,10 @@
   "engines": {
     "vscode": "^1.132.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ze-mu-zhou/zm_vscode_plugin.git"
+  },
   "categories": [
     "Other"
   ],
