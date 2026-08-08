@@ -27,6 +27,21 @@ function updateStatusBar(): void {
 	}
 }
 
+// 风险点显眼装饰：gutter ⚠ 图标 + 行首标记（activate 中创建）
+let riskDecoration: vscode.TextEditorDecorationType | undefined;
+
+/** 将风险装饰应用到所有可见编辑器中匹配 uri 的编辑器。ranges 为空数组时清除装饰。 */
+function applyRiskDecorations(uri: vscode.Uri, ranges: vscode.Range[]): void {
+	if (!riskDecoration) {
+		return;
+	}
+	for (const editor of vscode.window.visibleTextEditors) {
+		if (editor.document.uri.toString() === uri.toString()) {
+			editor.setDecorations(riskDecoration, ranges);
+		}
+	}
+}
+
 interface Resp {
 	answer: ZM_range[]
 }
@@ -216,6 +231,7 @@ async function advanced_analyze_file(doc: vscode.TextDocument, text: string, sil
 		));
 	}
 	diagnostic.set(doc.uri, diags);
+	applyRiskDecorations(doc.uri, diags.map(d => d.range));
 	updateStatusBar();
 	return true;
 }
@@ -258,6 +274,7 @@ async function doAnalyzeFile(doc: vscode.TextDocument, uriKey: string) {
 	cacheSet(uriKey, newEntry);
 	if (result === null) {
 		diagnostic.set(doc.uri, []);
+		applyRiskDecorations(doc.uri, []);
 		updateStatusBar();
 		return;
 	}
@@ -265,6 +282,7 @@ async function doAnalyzeFile(doc: vscode.TextDocument, uriKey: string) {
 	const ok = await advanced_analyze_file(doc, text);
 	if (!ok) {
 		diagnostic.set(doc.uri, []);
+		applyRiskDecorations(doc.uri, []);
 		updateStatusBar();
 	}
 	newEntry.advancedOK = ok;
@@ -273,6 +291,23 @@ async function doAnalyzeFile(doc: vscode.TextDocument, uriKey: string) {
 export async function activate(context: vscode.ExtensionContext) {
 	// pyc 查看器不依赖 vermin，独立注册
 	registerPycViewer(context);
+
+	// 风险点装饰：gutter ⚠ 图标 + 行首 ⚠️ 标记
+	riskDecoration = vscode.window.createTextEditorDecorationType({
+		gutterIconPath: vscode.Uri.joinPath(vscode.Uri.file(context.extensionPath), 'icons', 'warning.svg'),
+		gutterIconSize: 'contain',
+		before: { contentText: '⚠️', margin: '0 4px 0 0' },
+	});
+	context.subscriptions.push(riskDecoration);
+	// 编辑器显隐变化后重放装饰（装饰不自动跟随可见编辑器列表）
+	context.subscriptions.push(vscode.window.onDidChangeVisibleTextEditors(() => {
+		for (const editor of vscode.window.visibleTextEditors) {
+			const diags = diagnostic.get(editor.document.uri);
+			if (riskDecoration) {
+				editor.setDecorations(riskDecoration, diags ? diags.map(d => d.range) : []);
+			}
+		}
+	}));
 
 	await check_vermin();
 	if (vermin_up) {
