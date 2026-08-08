@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { execFile } from 'child_process';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 
 /** 双击 .pyc 时反编译为临时 .py 并打开，让所有 Python 插件对反编译结果生效。 */
 
@@ -295,15 +295,49 @@ function uniqueTempPath(tmpDir: string): string {
 	return path.join(tmpDir, `${FILE_PREFIX}${randomBytes(8).toString('hex')}_${Date.now().toString(16)}.py`);
 }
 
-/** 反编译 pyc 并写入临时 .py 文件（顶部带魔数版本与工具探测注释），返回其路径。 */
-async function decompileToTempFile(pycPath: string, tmpDir: string, tools: ToolStatus, version: PycVersionInfo): Promise<{ pyPath: string; tool: string; error: string | null }> {
+/**
+ * 反编译缓存 key：sha1(绝对路径+工具集)_mtimeMs_大小。
+ * 缓存命中条件：同一文件（路径+mtime+size 未变）且工具集未变。
+ */
+function cachePathFor(pycPath: string, cacheDir: string, tools: ToolStatus): string | null {
+	try {
+		const st = fs.statSync(pycPath);
+		const toolset = [tools.pylingual ?? '', tools.uncompyle6 ?? '', tools.pycdc ?? ''].join('|');
+		const hash = createHash('sha1').update(path.resolve(pycPath) + '|' + toolset).digest('hex').slice(0, 16);
+		return path.join(cacheDir, `${hash}_${st.mtimeMs}_${st.size}.py`);
+	} catch {
+		return null;
+	}
+}
+
+/** 反编译 pyc 并写入临时 .py 文件（顶部带魔数版本与工具探测注释），返回其路径。结果按文件特征缓存，命中时零等待。 */
+async function decompileToTempFile(pycPath: string, tmpDir: string, cacheDir: string, tools: ToolStatus, version: PycVersionInfo): Promise<{ pyPath: string; tool: string; error: string | null }> {
 	fs.mkdirSync(tmpDir, { recursive: true });
+
+	// 1) 命中缓存：直接复制缓存内容到临时文件，跳过反编译
+	const cacheFile = cachePathFor(pycPath, cacheDir, tools);
+	if (cacheFile && fs.existsSync(cacheFile)) {
+		const pyPath = uniqueTempPath(tmpDir);
+		fs.copyFileSync(cacheFile, pyPath);
+		return { pyPath, tool: 'cache', error: null };
+	}
+
+	// 2) 未命中：反编译并写临时文件，同时写入缓存
 	const { text, tool, error } = await decompile(pycPath, tools, version);
 	if (text === null) {
 		return { pyPath: '', tool, error };
 	}
+	const content = buildHeaderComment(tools, tool, version) + text;
 	const pyPath = uniqueTempPath(tmpDir);
-	fs.writeFileSync(pyPath, buildHeaderComment(tools, tool, version) + text, 'utf8');
+	fs.writeFileSync(pyPath, content, 'utf8');
+	if (cacheFile) {
+		try {
+			fs.mkdirSync(cacheDir, { recursive: true });
+			fs.writeFileSync(cacheFile, content, 'utf8');
+		} catch {
+			// 缓存写入失败不影响主流程
+		}
+	}
 	return { pyPath, tool, error: null };
 }
 
@@ -326,6 +360,8 @@ export function cleanupTmpDir(extensionPath: string) {
  */
 export function registerPycViewer(context: vscode.ExtensionContext) {
 	const tmpDir = path.join(context.extensionPath, TMP_DIR_NAME);
+	// 反编译结果缓存：放 VS Code 扩展全局存储目录，跨会话保留（不随扩展停用清空）
+	const cacheDir = path.join(context.globalStorageUri.fsPath, 'decompile-cache');
 
 	// 激活时异步探测工具，探测结果写入反编译文件的头部注释
 	const toolsPromise = detectTools();
@@ -334,7 +370,7 @@ export function registerPycViewer(context: vscode.ExtensionContext) {
 		async openCustomDocument(uri: vscode.Uri): Promise<PycDocument> {
 			const tools = await toolsPromise;
 			const version = readPycVersion(uri.fsPath);
-			const { pyPath, tool, error } = await decompileToTempFile(uri.fsPath, tmpDir, tools, version);
+			const { pyPath, tool, error } = await decompileToTempFile(uri.fsPath, tmpDir, cacheDir, tools, version);
 			return {
 				uri,
 				dispose: () => { /* 临时文件由清理命令/deactivate 统一处理 */ },
@@ -373,7 +409,7 @@ export function registerPycViewer(context: vscode.ExtensionContext) {
 			vscode.window.showErrorMessage('[pyc2py] 请在 .pyc 文件上使用此命令');
 			return;
 		}
-		const { pyPath, error } = await decompileToTempFile(target.fsPath, tmpDir, await toolsPromise, readPycVersion(target.fsPath));
+		const { pyPath, error } = await decompileToTempFile(target.fsPath, tmpDir, cacheDir, await toolsPromise, readPycVersion(target.fsPath));
 		if (pyPath) {
 			await vscode.window.showTextDocument(vscode.Uri.file(pyPath), { preview: true });
 		} else {
