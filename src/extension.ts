@@ -10,6 +10,23 @@ let vermin_up: boolean = false;
 let pyshell_os_path_join: PythonShell;
 const diagnostic = vscode.languages.createDiagnosticCollection("python check");
 
+// 状态栏：当前文件风险计数（更显眼的 lint 提示）
+const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+
+/** 刷新状态栏：统计当前活动文件的风险诊断数，无风险时隐藏。 */
+function updateStatusBar(): void {
+	const uri = vscode.window.activeTextEditor?.document.uri;
+	const diags = uri ? diagnostic.get(uri) : undefined;
+	const count = diags ? diags.length : 0;
+	if (uri && count > 0) {
+		statusBar.text = `$(warning) ${count} 处风险`;
+		statusBar.tooltip = '当前文件的安全风险点，详见 Problems 面板';
+		statusBar.show();
+	} else {
+		statusBar.hide();
+	}
+}
+
 interface Resp {
 	answer: ZM_range[]
 }
@@ -195,10 +212,11 @@ async function advanced_analyze_file(doc: vscode.TextDocument, text: string, sil
 		diags.push(new vscode.Diagnostic(
 			range,
 			`检测到 os.path.join() 函数\n该函数在拼接多个绝对路径时只保留最后一个绝对路径\neg: os.path.join("/etc/passwd", "/usr/root") 结果为 "/usr/root"\n如果 os.path.join 内部最后一个参数为用户输入, 可能会引发任意文件读写, 十分危险⚠️`,
-			vscode.DiagnosticSeverity.Warning
+			vscode.DiagnosticSeverity.Error
 		));
 	}
 	diagnostic.set(doc.uri, diags);
+	updateStatusBar();
 	return true;
 }
 
@@ -240,12 +258,14 @@ async function doAnalyzeFile(doc: vscode.TextDocument, uriKey: string) {
 	cacheSet(uriKey, newEntry);
 	if (result === null) {
 		diagnostic.set(doc.uri, []);
+		updateStatusBar();
 		return;
 	}
 	showVerminMessages(result);
 	const ok = await advanced_analyze_file(doc, text);
 	if (!ok) {
 		diagnostic.set(doc.uri, []);
+		updateStatusBar();
 	}
 	newEntry.advancedOK = ok;
 }
@@ -287,6 +307,8 @@ export async function activate(context: vscode.ExtensionContext) {
 		});
 		context.subscriptions.push(
 			diagnostic,
+			statusBar,
+			vscode.window.onDidChangeActiveTextEditor(() => updateStatusBar()),
 			disposable_analyze_python_file_when_open,
 			disposable_analyze_python_file_when_change,
 			disposable_analyze_python_file_when_save,
