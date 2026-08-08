@@ -9,3 +9,7 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+
+tmp_python/**
+**/__pycache__/**
+**/*.pyc

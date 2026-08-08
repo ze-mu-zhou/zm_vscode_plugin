@@ -20,8 +20,39 @@
         "title": "基础 python 下限版本扫描",
         "category": "ZM_python",
         "enablement": "editorLangId == python"
+      },
+      {
+        "command": "zemu.decompilePycToPy",
+        "title": "反编译为临时 py 并打开",
+        "category": "ZM_python"
+      },
+      {
+        "command": "zemu.cleanupTmpPython",
+        "title": "清理临时反编译文件",
+        "category": "ZM_python"
       }
-    ]
+    ],
+    "customEditors": [
+      {
+        "viewType": "zemu.pycViewer",
+        "displayName": "Pyc 反编译查看器",
+        "selector": [
+          {
+            "filenamePattern": "*.pyc"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "zemu.decompilePycToPy",
+          "when": "resourceExtname == .pyc",
+          "group": "ZM_python@1"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

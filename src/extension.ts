@@ -4,6 +4,7 @@ import { exec } from 'child_process';
 import { createHash } from 'crypto';
 import { runVermin, type VerminResult } from './vermin';
 import { PythonShell } from 'python-shell';
+import { registerPycViewer } from './pycViewer';
 
 let vermin_up: boolean = false;
 let pyshell_os_path_join: PythonShell;
@@ -250,6 +251,9 @@ async function doAnalyzeFile(doc: vscode.TextDocument, uriKey: string) {
 }
 
 export async function activate(context: vscode.ExtensionContext) {
+	// pyc 查看器不依赖 vermin，独立注册
+	registerPycViewer(context);
+
 	await check_vermin();
 	if (vermin_up) {
 		pyshell_os_path_join = new PythonShell('ast_os_path_join.py', {
