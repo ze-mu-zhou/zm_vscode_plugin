@@ -292,10 +292,8 @@ export async function activate(context: vscode.ExtensionContext) {
 	// pyc 查看器不依赖 vermin，独立注册
 	registerPycViewer(context);
 
-	// 风险点装饰：gutter ⚠ 图标 + 行首 ⚠️ 标记
+	// 风险点装饰：行首 ⚠️ 标记
 	riskDecoration = vscode.window.createTextEditorDecorationType({
-		gutterIconPath: vscode.Uri.joinPath(vscode.Uri.file(context.extensionPath), 'icons', 'warning.svg'),
-		gutterIconSize: 'contain',
 		before: { contentText: '⚠️', margin: '0 4px 0 0' },
 	});
 	context.subscriptions.push(riskDecoration);
