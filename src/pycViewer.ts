@@ -64,6 +64,71 @@ async function detectTools(): Promise<ToolStatus> {
 	return { uncompyle6, pylingual, pycdc };
 }
 
+/** pyc 魔数识别结果。minor 为 0 表示无法识别。 */
+interface PycVersionInfo {
+	minor: number;
+	label: string;
+}
+
+/**
+ * 读取 pyc 头部 4 字节魔数（小端），映射到 Python 版本。
+ * 参考 CPython importlib/_bootstrap_external.py 的 magic 注释表：
+ * 3.6=3379 3.7=3394 3.8=3413 3.9=3425 3.10=3439；3.11 起 magic=2900+50n 区间。
+ */
+function readPycVersion(pycPath: string): PycVersionInfo {
+	let m = 0;
+	try {
+		const fd = fs.openSync(pycPath, 'r');
+		const buf = Buffer.alloc(2);
+		fs.readSync(fd, buf, 0, 2, 0);
+		fs.closeSync(fd);
+		m = buf.readUInt16LE(0);
+	} catch {
+		return { minor: 0, label: 'unknown' };
+	}
+	let minor = 0;
+	if (m >= 3360 && m <= 3389) minor = 6;
+	else if (m >= 3390 && m <= 3412) minor = 7;
+	else if (m >= 3413 && m <= 3419) minor = 8;
+	else if (m >= 3420 && m <= 3429) minor = 9;
+	else if (m >= 3430 && m <= 3449) minor = 10;
+	else if (m >= 3450 && m <= 3499) minor = 11;
+	else if (m >= 3500 && m <= 3549) minor = 12;
+	else if (m >= 3550 && m <= 3599) minor = 13;
+	else if (m >= 3600 && m <= 3699) minor = 14;
+	return minor ? { minor, label: `3.${minor}` } : { minor: 0, label: `unknown (magic ${m})` };
+}
+
+/**
+ * 按 pyc 版本选择还原效果最好的工具链（已探测可用），返回依次尝试的工具名数组。
+ * - ≤3.8: uncompyle6 规则引擎还原质量最好
+ * - 3.9-3.11: pycdc 支持良好且快
+ * - 3.12-3.13: pycdc 支持有限，pylingual 优先
+ * - 3.14: 仅 pylingual
+ * - 未知: 原顺序 pylingual → uncompyle6 → pycdc
+ */
+function pickToolChain(version: PycVersionInfo, tools: ToolStatus): string[] {
+	const chain: string[] = [];
+	const add = (t: string | null) => { if (t && !chain.includes(t)) chain.push(t); };
+	switch (version.minor) {
+		case 6: case 7: case 8:
+			add(tools.uncompyle6); add(tools.pylingual); add(tools.pycdc);
+			break;
+		case 9: case 10: case 11:
+			add(tools.pycdc); add(tools.pylingual);
+			break;
+		case 12: case 13:
+			add(tools.pylingual); add(tools.pycdc);
+			break;
+		case 14:
+			add(tools.pylingual);
+			break;
+		default:
+			add(tools.pylingual); add(tools.uncompyle6); add(tools.pycdc);
+	}
+	return chain;
+}
+
 const INSTALL_HINTS =
 	'# 安装方法（未安装的工具）:\n' +
 	'#   pylingual（3.6-3.14，优先）  : git clone https://github.com/syssec-utd/pylingual && uv tool install ./pylingual\n' +
@@ -73,11 +138,12 @@ const INSTALL_HINTS =
 	'#       若长时间无结果，通常是网络无法访问模型仓库，可设置环境变量 HF_ENDPOINT 指定其他镜像后重启 VS Code。\n' +
 	'# 三个工具均失败时插件会直接提示失败，不再生成 dis 反汇编。';
 
-/** 生成文件头注释：三工具探测状态 + 本次使用工具 + 安装方法。 */
-function buildHeaderComment(tools: ToolStatus, usedTool: string | null): string {
+/** 生成文件头注释：魔数识别的版本 + 三工具探测状态 + 本次使用工具 + 安装方法。 */
+function buildHeaderComment(tools: ToolStatus, usedTool: string | null, version: PycVersionInfo): string {
 	const mark = (p: string | null) => (p ? '已安装' : '未安装');
 	return [
 		'# ===== pyc2py 反编译信息 =====',
+		`# 魔数识别版本: Python ${version.label}`,
 		`# 工具探测: uncompyle6 ${mark(tools.uncompyle6)} | pylingual ${mark(tools.pylingual)} | pycdc ${mark(tools.pycdc)}`,
 		`# 本次使用: ${usedTool ?? '反编译失败'}`,
 		'',
@@ -103,36 +169,36 @@ function execFileAsync(cmd: string, args: string[], timeoutMs?: number, env?: No
  * 反编译链：pylingual → uncompyle6 → pycdc。
  * 某级失败（未安装/版本不支持/反编译出错）时静默回退；全部失败则返回 error，不生成 dis 反汇编。
  */
-async function decompile(pycPath: string, tools: ToolStatus): Promise<{ text: string | null; tool: string; error: string | null }> {
-	// 1) pylingual（3.6-3.14 全覆盖，还原质量最好，优先）
-	if (tools.pylingual) {
-		const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pylingual-'));
-		// pylingual 从 HuggingFace 下载模型，国内网络默认走 hf-mirror 镜像（用户已配置 HF_ENDPOINT 则优先）
-		const pylingualEnv = {
-			...process.env,
-			HF_ENDPOINT: process.env.HF_ENDPOINT ?? 'https://hf-mirror.com',
-		};
-		try {
-			await execFileAsync(tools.pylingual, ['-q', '-o', outDir, pycPath], 600_000, pylingualEnv);
-			const files = fs.readdirSync(outDir).filter(f => f.endsWith('.py'));
-			if (files.length > 0) {
-				const text = fs.readFileSync(path.join(outDir, files[0]), 'utf8');
-				return { text, tool: 'pylingual', error: null };
-			}
-		} catch {
-			// 失败（通常是模型下载/网络问题），继续
-		} finally {
-			fs.rmSync(outDir, { recursive: true, force: true });
+/** 尝试 pylingual：输出到临时目录，成功后读回 .py 内容。 */
+async function runPylingual(pylingual: string, pycPath: string): Promise<string | null> {
+	const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pylingual-'));
+	// pylingual 从 HuggingFace 下载模型，国内网络默认走 hf-mirror 镜像（用户已配置 HF_ENDPOINT 则优先）
+	const pylingualEnv = {
+		...process.env,
+		HF_ENDPOINT: process.env.HF_ENDPOINT ?? 'https://hf-mirror.com',
+	};
+	try {
+		await execFileAsync(pylingual, ['-q', '-o', outDir, pycPath], 600_000, pylingualEnv);
+		const files = fs.readdirSync(outDir).filter(f => f.endsWith('.py'));
+		if (files.length > 0) {
+			return fs.readFileSync(path.join(outDir, files[0]), 'utf8');
 		}
+		return null;
+	} catch {
+		// 失败（通常是模型下载/网络问题），继续
+		return null;
+	} finally {
+		fs.rmSync(outDir, { recursive: true, force: true });
 	}
+}
 
-	// 2) uncompyle6（Python ≤3.8 还原效果较好）
-	// 注意：它对不支持的版本会退出码 0 但输出 "Unsupported" 错误，必须内容校验
-	if (tools.uncompyle6) {
+/** 尝试 uncompyle6（含 python -m uncompyle6 兼容路径）。注意它对不支持的版本会退出码 0 但输出 "Unsupported" 错误，必须内容校验。 */
+async function runUncompyle6(uncompyle6: string, pycPath: string): Promise<string | null> {
+	if (uncompyle6) {
 		try {
-			const stdout = await execFileAsync(tools.uncompyle6, [pycPath]);
+			const stdout = await execFileAsync(uncompyle6, [pycPath]);
 			if (stdout.trim() && !/Unsupported/i.test(stdout)) {
-				return { text: stdout, tool: 'uncompyle6', error: null };
+				return stdout;
 			}
 		} catch {
 			// 反编译失败，继续回退
@@ -142,30 +208,54 @@ async function decompile(pycPath: string, tools: ToolStatus): Promise<{ text: st
 	try {
 		const stdout = await execFileAsync('python', ['-m', 'uncompyle6', pycPath]);
 		if (stdout.trim() && !/Unsupported/i.test(stdout)) {
-			return { text: stdout, tool: 'uncompyle6', error: null };
+			return stdout;
 		}
 	} catch {
 		// 继续回退
 	}
+	return null;
+}
 
-	// 3) pycdc（支持较新的 Python 版本）
-	if (tools.pycdc) {
-		try {
-			const stdout = await execFileAsync(tools.pycdc, [pycPath]);
-			if (stdout.trim() && !/^#\s*(Decompilation failed|Python version .*not supported|Unsupported)/im.test(stdout)) {
-				return { text: stdout, tool: 'pycdc', error: null };
-			}
-		} catch {
-			// 未安装或失败，继续回退
+/** 尝试 pycdc。 */
+async function runPycdc(pycdc: string, pycPath: string): Promise<string | null> {
+	try {
+		const stdout = await execFileAsync(pycdc, [pycPath]);
+		if (stdout.trim() && !/^#\s*(Decompilation failed|Python version .*not supported|Unsupported)/im.test(stdout)) {
+			return stdout;
+		}
+	} catch {
+		// 未安装或失败，继续回退
+	}
+	return null;
+}
+
+/**
+ * 反编译：先按魔数识别 pyc 版本，再用 pickToolChain 选出的最优工具链逐级回退。
+ * 全部失败则返回 error，不生成 dis 反汇编。
+ */
+async function decompile(pycPath: string, tools: ToolStatus, version: PycVersionInfo): Promise<{ text: string | null; tool: string; error: string | null }> {
+	const chain = pickToolChain(version, tools);
+	for (const tool of chain) {
+		let text: string | null = null;
+		if (tool === 'pylingual') {
+			text = await runPylingual(tools.pylingual!, pycPath);
+		} else if (tool === 'uncompyle6') {
+			text = await runUncompyle6(tools.uncompyle6!, pycPath);
+		} else if (tool === 'pycdc') {
+			text = await runPycdc(tools.pycdc!, pycPath);
+		}
+		if (text) {
+			return { text, tool, error: null };
 		}
 	}
-
 	return {
 		text: null,
 		tool: '',
-		error: '反编译失败：pylingual、uncompyle6、pycdc 均未能还原该 pyc。'
-			+ 'pylingual 失败通常是模型下载问题（检查网络，或设置环境变量 HF_ENDPOINT 指定镜像）；'
-			+ '若为 3.13+ 字节码，现有工具支持有限。',
+		error: chain.length === 0
+			? '反编译失败：未找到任何可用的反编译工具，请先安装（见文件头安装说明）。'
+			: `反编译失败：${chain.join('、')} 均未能还原该 pyc（识别版本 Python ${version.label}）。`
+				+ 'pylingual 失败通常是模型下载问题（检查网络，或设置环境变量 HF_ENDPOINT 指定镜像）；'
+				+ '若为 3.13+ 字节码，现有工具支持有限。',
 	};
 }
 
@@ -182,15 +272,15 @@ function uniqueTempPath(tmpDir: string): string {
 	return path.join(tmpDir, `${FILE_PREFIX}${randomBytes(8).toString('hex')}_${Date.now().toString(16)}.py`);
 }
 
-/** 反编译 pyc 并写入临时 .py 文件（顶部带工具探测注释），返回其路径。 */
-async function decompileToTempFile(pycPath: string, tmpDir: string, tools: ToolStatus): Promise<{ pyPath: string; tool: string; error: string | null }> {
+/** 反编译 pyc 并写入临时 .py 文件（顶部带魔数版本与工具探测注释），返回其路径。 */
+async function decompileToTempFile(pycPath: string, tmpDir: string, tools: ToolStatus, version: PycVersionInfo): Promise<{ pyPath: string; tool: string; error: string | null }> {
 	fs.mkdirSync(tmpDir, { recursive: true });
-	const { text, tool, error } = await decompile(pycPath, tools);
+	const { text, tool, error } = await decompile(pycPath, tools, version);
 	if (text === null) {
 		return { pyPath: '', tool, error };
 	}
 	const pyPath = uniqueTempPath(tmpDir);
-	fs.writeFileSync(pyPath, buildHeaderComment(tools, tool) + text, 'utf8');
+	fs.writeFileSync(pyPath, buildHeaderComment(tools, tool, version) + text, 'utf8');
 	return { pyPath, tool, error: null };
 }
 
@@ -220,7 +310,8 @@ export function registerPycViewer(context: vscode.ExtensionContext) {
 	const provider: vscode.CustomReadonlyEditorProvider<PycDocument> = {
 		async openCustomDocument(uri: vscode.Uri): Promise<PycDocument> {
 			const tools = await toolsPromise;
-			const { pyPath, tool, error } = await decompileToTempFile(uri.fsPath, tmpDir, tools);
+			const version = readPycVersion(uri.fsPath);
+			const { pyPath, tool, error } = await decompileToTempFile(uri.fsPath, tmpDir, tools, version);
 			return {
 				uri,
 				dispose: () => { /* 临时文件由清理命令/deactivate 统一处理 */ },
@@ -259,7 +350,7 @@ export function registerPycViewer(context: vscode.ExtensionContext) {
 			vscode.window.showErrorMessage('[pyc2py] 请在 .pyc 文件上使用此命令');
 			return;
 		}
-		const { pyPath, error } = await decompileToTempFile(target.fsPath, tmpDir, await toolsPromise);
+		const { pyPath, error } = await decompileToTempFile(target.fsPath, tmpDir, await toolsPromise, readPycVersion(target.fsPath));
 		if (pyPath) {
 			await vscode.window.showTextDocument(vscode.Uri.file(pyPath), { preview: true });
 		} else {
