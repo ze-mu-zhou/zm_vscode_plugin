@@ -14,7 +14,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onLanguage:python"
+    "onLanguage:python",
+    "onCustomEditor:zemu.pycViewer"
   ],
   "main": "./out/extension.js",
   "contributes": {
